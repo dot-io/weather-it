@@ -76,7 +76,6 @@ impl DayDetail<'_> {
             kv("Night", format!("{:.0}°C  (feels {:.0}°)", e.temp_night, e.feels_night)),
             kv("Min / Max", format!("{:.0}° / {:.0}°", e.temp_min, e.temp_max)),
             kv("Humidity", format!("{}%", e.humidity)),
-            kv("Dew point", format!("{:.0}°C", e.dew_point)),
             kv("Pressure", format!("{} hPa", e.pressure)),
             kv(
                 "Wind",
@@ -91,7 +90,6 @@ impl DayDetail<'_> {
             lines.push(kv("Gusts", format!("{:.0} km/h", ms_to_kmh(gust))));
         }
         lines.push(kv("Cloud", format!("{}%", e.clouds)));
-        lines.push(kv("Precip", format!("{}%", e.pop)));
         if let Some(rain) = e.rain {
             lines.push(kv("Rain", format!("{:.1} mm", rain)));
         }

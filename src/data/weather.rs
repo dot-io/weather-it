@@ -89,16 +89,14 @@ pub struct DailyEntry {
     pub feels_night: f32,
     pub pressure: u32,
     pub humidity: u32,
-    pub dew_point: f32,
     pub wind_speed: f32,
     pub wind_deg: f32,
     pub wind_gust: Option<f32>,
     pub clouds: u32,
-    /// Probability of precipitation, 0..=100 (percent).
-    pub pop: u16,
     pub uvi: f32,
     pub rain: Option<f32>,
     pub snow: Option<f32>,
+    /// Synthesized from clouds/rain — the daily timeline carries no condition.
     pub description: String,
     pub icon: String,
 }
@@ -147,7 +145,7 @@ struct RawCurrent {
     dt: i64,
     temp: f32,
     feels_like: f32,
-    pressure: u32,
+    pressure: f32,
     humidity: u32,
     dew_point: f32,
     #[serde(default)]
@@ -210,24 +208,21 @@ struct RawDaily {
     moon_phase: f32,
     temp: RawTemp,
     feels_like: RawFeels,
-    pressure: u32,
+    pressure: f32,
     humidity: u32,
-    dew_point: f32,
     wind_speed: f32,
     #[serde(default)]
     wind_deg: f32,
     wind_gust: Option<f32>,
     clouds: u32,
     #[serde(default)]
-    pop: f32,
-    #[serde(default)]
     uvi: f32,
     #[serde(default)]
     rain: Option<f32>,
     #[serde(default)]
     snow: Option<f32>,
-    #[serde(default)]
-    weather: Vec<RawCondition>,
+    // Note: the daily timeline sends `weather: null`, so we don't read it here
+    // (serde ignores it) and synthesize the condition from clouds/rain instead.
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,7 +330,7 @@ pub async fn fetch_weather(
             dt: cur.dt,
             temp: cur.temp,
             feels_like: cur.feels_like,
-            pressure: cur.pressure,
+            pressure: cur.pressure.round() as u32,
             humidity: cur.humidity,
             dew_point: cur.dew_point,
             uvi: cur.uvi,
@@ -368,7 +363,10 @@ pub async fn fetch_weather(
             .data
             .into_iter()
             .map(|d| {
-                let (description, icon) = first_condition(&d.weather);
+                // The daily timeline carries no `weather`, so synthesize a
+                // condition from cloud cover and precipitation.
+                let (description, icon) =
+                    synthesize_condition(d.clouds, d.rain.unwrap_or(0.0), d.snow.unwrap_or(0.0));
                 DailyEntry {
                     dt: d.dt,
                     sunrise: d.sunrise,
@@ -386,14 +384,12 @@ pub async fn fetch_weather(
                     feels_day: d.feels_like.day,
                     feels_eve: d.feels_like.eve,
                     feels_night: d.feels_like.night,
-                    pressure: d.pressure,
+                    pressure: d.pressure.round() as u32,
                     humidity: d.humidity,
-                    dew_point: d.dew_point,
                     wind_speed: d.wind_speed,
                     wind_deg: d.wind_deg,
                     wind_gust: d.wind_gust,
                     clouds: d.clouds,
-                    pop: (d.pop * 100.0).round() as u16,
                     uvi: d.uvi,
                     rain: d.rain,
                     snow: d.snow,
@@ -433,6 +429,27 @@ pub fn hourly_weather_for(data: &WeatherResponse, date: NaiveDate) -> Vec<Hourly
 // ---------------------------------------------------------------------------
 // Presentation helpers
 // ---------------------------------------------------------------------------
+
+/// Derive a `(description, icon)` for a day from cloud cover and precipitation.
+/// One Call 4.0's daily timeline omits the `weather` condition, so we infer it.
+fn synthesize_condition(clouds: u32, rain_mm: f32, snow_mm: f32) -> (String, String) {
+    let (desc, icon) = if snow_mm > 0.0 {
+        ("Snow", "13d")
+    } else if rain_mm >= 2.0 {
+        ("Rain", "10d")
+    } else if rain_mm > 0.0 {
+        ("Light rain", "10d")
+    } else if clouds >= 85 {
+        ("Overcast", "04d")
+    } else if clouds >= 50 {
+        ("Partly cloudy", "03d")
+    } else if clouds >= 25 {
+        ("Few clouds", "02d")
+    } else {
+        ("Clear sky", "01d")
+    };
+    (desc.to_string(), icon.to_string())
+}
 
 /// Map an OpenWeatherMap icon code (e.g. `01d`, `10n`) to an emoji.
 pub fn icon_to_emoji(icon: &str) -> &'static str {

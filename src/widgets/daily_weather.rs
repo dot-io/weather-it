@@ -55,7 +55,11 @@ impl Widget for DailyWeather {
             Paragraph::new(format!("🔺 {:.0}°  🔻 {:.0}°", entry.temp_max, entry.temp_min))
                 .render(lines[1], buf);
             Paragraph::new(format!("🌡️ day {:.0}°", entry.temp_day)).render(lines[2], buf);
-            Paragraph::new(format!("☔ {}%", entry.pop)).render(lines[3], buf);
+            let precip = match entry.rain {
+                Some(mm) if mm > 0.0 => format!("🌧 {:.1}mm", mm),
+                _ => format!("☁ {}%", entry.clouds),
+            };
+            Paragraph::new(precip).render(lines[3], buf);
         }
     }
 }

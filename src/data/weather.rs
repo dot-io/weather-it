@@ -1,227 +1,483 @@
-use chrono::{NaiveDate, NaiveDateTime};
-use iana_time_zone::get_timezone;
+//! OpenWeatherMap One Call API 4.0 client and internal weather model.
+//!
+//! One Call 4.0 splits data across several endpoints, so a full refresh makes
+//! three calls: `/current`, `/timeline/1day` (week overview) and
+//! `/timeline/1h` (near-term hourly). Requires a key subscribed to the
+//! "One Call by Call" plan (free tier: 1000 calls/day).
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde::Deserialize;
+use std::env;
 use std::error::Error;
+use std::fs;
+use std::path::PathBuf;
 
-#[derive(Debug, Deserialize, Default)]
-pub struct OpenMeteoResponse {
-    pub hourly: OpenMeteoHourly,
-    pub daily: OpenMeteoDaily,
-    // pub current: OpenMeteoCurrent,
-    // pub daily_units: DailyUnits,
+const ONE_CALL_BASE: &str = "https://api.openweathermap.org/data/4.0/onecall";
+
+// ---------------------------------------------------------------------------
+// Internal model consumed by the widgets
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone)]
+pub struct WeatherResponse {
+    pub current: CurrentWeather,
+    pub hourly: Vec<HourlyEntry>,
+    pub daily: Vec<DailyEntry>,
+    pub alerts: Vec<Alert>,
+    /// Seconds to add to a UTC timestamp to get local wall-clock time.
+    pub timezone_offset: i64,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
-pub struct OpenMeteoHourly {
-    #[serde(rename = "time")]
-    pub date_time: Vec<String>,
-    pub temperature_2m: Vec<f32>,
-    pub apparent_temperature: Vec<f32>,
-    pub precipitation_probability: Vec<u16>,
-    // pub relative_humidity_2m: Vec<u32>,
-    #[serde(rename = "weathercode")]
-    pub weather_code: Vec<u16>,
-    // pub windspeed_10m: Vec<f32>,
-    // pub winddirection_10m: Vec<f32>,
+impl WeatherResponse {
+    /// Convert a UTC unix timestamp into local wall-clock time for the
+    /// forecast location (not the machine running the app).
+    pub fn local(&self, ts: i64) -> NaiveDateTime {
+        DateTime::from_timestamp(ts + self.timezone_offset, 0)
+            .map(|dt| dt.naive_utc())
+            .unwrap_or_default()
+    }
 }
 
-// #[derive(Debug, Deserialize, Default)]
-// struct HourlyUnits {
-//     temperature_2m: String,
-//     precipitation_probability: String,
-//     apparent_temperature: String,
-// }
-
-#[derive(Debug, Deserialize, Default, Clone)]
-pub struct OpenMeteoDaily {
-    #[serde(rename = "time")]
-    pub date: Vec<String>,
-    pub weather_code: Vec<u16>,
-    // pub temperature_2m_min: Vec<f32>,
-    pub temperature_2m_max: Vec<f32>,
-    // pub apparent_temperature_min: Vec<f32>,
-    pub apparent_temperature_max: Vec<f32>,
-    pub precipitation_probability_max: Vec<u16>,
+#[derive(Debug, Default, Clone)]
+pub struct CurrentWeather {
+    pub dt: i64,
+    pub temp: f32,
+    pub feels_like: f32,
+    pub pressure: u32,
+    pub humidity: u32,
+    pub dew_point: f32,
+    pub uvi: f32,
+    pub clouds: u32,
+    pub visibility: u32,
+    pub wind_speed: f32,
+    pub wind_deg: f32,
+    pub wind_gust: Option<f32>,
+    pub description: String,
+    pub icon: String,
 }
 
-// #[derive(Debug, Deserialize, Default)]
-// struct DailyUnits {
-//     temperature_2m_max: String,
-//     temperature_2m_min: String,
-//     apparent_temperature_max: String,
-//     apparent_temperature_min: String,
-//     precipitation_probability_max: String,
-// }
+#[derive(Debug, Default, Clone)]
+pub struct HourlyEntry {
+    pub dt: i64,
+    pub temp: f32,
+    pub feels_like: f32,
+    /// Probability of precipitation, 0..=100 (percent).
+    pub pop: u16,
+    pub wind_speed: f32,
+    pub wind_deg: f32,
+    pub description: String,
+    pub icon: String,
+}
 
-// #[derive(Debug, Deserialize, Default)]
-// pub struct OpenMeteoCurrent {
-//     #[serde(rename = "time")]
-//     pub date_time: String,
-//     pub temperature_2m: f32,
-//     pub weather_code: u16,
-//     pub apparent_temperature: f32,
-//     pub precipitation: f32,
-//     pub relative_humidity_2m: u32,
-// }
+#[derive(Debug, Default, Clone)]
+pub struct DailyEntry {
+    pub dt: i64,
+    pub sunrise: i64,
+    pub sunset: i64,
+    pub moonrise: i64,
+    pub moonset: i64,
+    pub moon_phase: f32,
+    pub temp_min: f32,
+    pub temp_max: f32,
+    pub temp_morn: f32,
+    pub temp_day: f32,
+    pub temp_eve: f32,
+    pub temp_night: f32,
+    pub feels_morn: f32,
+    pub feels_day: f32,
+    pub feels_eve: f32,
+    pub feels_night: f32,
+    pub pressure: u32,
+    pub humidity: u32,
+    pub dew_point: f32,
+    pub wind_speed: f32,
+    pub wind_deg: f32,
+    pub wind_gust: Option<f32>,
+    pub clouds: u32,
+    /// Probability of precipitation, 0..=100 (percent).
+    pub pop: u16,
+    pub uvi: f32,
+    pub rain: Option<f32>,
+    pub snow: Option<f32>,
+    pub description: String,
+    pub icon: String,
+}
 
-// #[derive(Debug, Deserialize, Default)]
-// struct CurrentUnits {
-//     pub temperature_2m: String,
-//     pub apparent_temperature: String,
-//     pub relative_humidity_2m: String,
-// }
+impl DailyEntry {
+    pub fn date(&self, tz_offset: i64) -> NaiveDate {
+        DateTime::from_timestamp(self.dt + tz_offset, 0)
+            .map(|dt| dt.naive_utc().date())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Alert {
+    pub event: String,
+    pub sender_name: String,
+    pub start: i64,
+    pub end: i64,
+    pub description: String,
+}
+
+// ---------------------------------------------------------------------------
+// Raw OWM JSON (One Call 4.0 envelopes)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct Envelope<T> {
+    #[serde(default)]
+    timezone_offset: i64,
+    #[serde(default = "Vec::new")]
+    data: Vec<T>,
+    #[serde(default)]
+    alerts: Vec<RawAlert>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCondition {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    icon: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawCurrent {
+    dt: i64,
+    temp: f32,
+    feels_like: f32,
+    pressure: u32,
+    humidity: u32,
+    dew_point: f32,
+    #[serde(default)]
+    uvi: f32,
+    clouds: u32,
+    #[serde(default)]
+    visibility: u32,
+    wind_speed: f32,
+    #[serde(default)]
+    wind_deg: f32,
+    wind_gust: Option<f32>,
+    #[serde(default)]
+    weather: Vec<RawCondition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawHourly {
+    dt: i64,
+    temp: f32,
+    feels_like: f32,
+    wind_speed: f32,
+    #[serde(default)]
+    wind_deg: f32,
+    #[serde(default)]
+    pop: f32,
+    #[serde(default)]
+    weather: Vec<RawCondition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTemp {
+    min: f32,
+    max: f32,
+    morn: f32,
+    day: f32,
+    eve: f32,
+    night: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawFeels {
+    morn: f32,
+    day: f32,
+    eve: f32,
+    night: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDaily {
+    dt: i64,
+    #[serde(default)]
+    sunrise: i64,
+    #[serde(default)]
+    sunset: i64,
+    #[serde(default)]
+    moonrise: i64,
+    #[serde(default)]
+    moonset: i64,
+    #[serde(default)]
+    moon_phase: f32,
+    temp: RawTemp,
+    feels_like: RawFeels,
+    pressure: u32,
+    humidity: u32,
+    dew_point: f32,
+    wind_speed: f32,
+    #[serde(default)]
+    wind_deg: f32,
+    wind_gust: Option<f32>,
+    clouds: u32,
+    #[serde(default)]
+    pop: f32,
+    #[serde(default)]
+    uvi: f32,
+    #[serde(default)]
+    rain: Option<f32>,
+    #[serde(default)]
+    snow: Option<f32>,
+    #[serde(default)]
+    weather: Vec<RawCondition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAlert {
+    #[serde(default)]
+    event: String,
+    #[serde(default)]
+    sender_name: String,
+    #[serde(default)]
+    start: i64,
+    #[serde(default)]
+    end: i64,
+    #[serde(default)]
+    description: String,
+}
+
+fn first_condition(conds: &[RawCondition]) -> (String, String) {
+    conds
+        .first()
+        .map(|c| (capitalize(&c.description), c.icon.clone()))
+        .unwrap_or_default()
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API key resolution
+// ---------------------------------------------------------------------------
+
+fn key_file() -> PathBuf {
+    let home = env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/waybar/scripts/.owm_api_key")
+}
+
+/// Resolve the OpenWeatherMap API key from `OWM_API_KEY` or the key file.
+pub fn api_key() -> Result<String, Box<dyn Error + Send + Sync>> {
+    if let Ok(key) = env::var("OWM_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+    let path = key_file();
+    let key = fs::read_to_string(&path)
+        .map_err(|_| {
+            format!(
+                "No OpenWeatherMap API key. Set OWM_API_KEY or write it to {}",
+                path.display()
+            )
+        })?
+        .trim()
+        .to_string();
+    if key.is_empty() {
+        return Err(format!("API key file {} is empty", path.display()).into());
+    }
+    Ok(key)
+}
+
+// ---------------------------------------------------------------------------
+// Fetching
+// ---------------------------------------------------------------------------
+
+async fn get_envelope<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Envelope<T>, Box<dyn Error + Send + Sync>> {
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        return Err(format!("OpenWeatherMap {}: {}", status.as_u16(), text.trim()).into());
+    }
+    Ok(serde_json::from_str(&text)?)
+}
 
 pub async fn fetch_weather(
     latitude: f32,
     longitude: f32,
-) -> Result<OpenMeteoResponse, Box<dyn Error + Send + Sync>> {
-    let time_zone = get_timezone()?;
+    key: &str,
+) -> Result<WeatherResponse, Box<dyn Error + Send + Sync>> {
+    let client = reqwest::Client::builder().user_agent("weather-it").build()?;
+    let q = format!("lat={latitude}&lon={longitude}&units=metric&appid={key}");
 
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast?\
-        latitude={}&\
-        longitude={}&\
-        hourly=temperature_2m,apparent_temperature,precipitation_probability,relative_humidity_2m,weathercode,windspeed_10m,winddirection_10m&\
-        daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_probability_max&\
-        current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,precipitation&\
-        temperature_unit=fahrenheit&\
-        windspeed_unit=mph&\
-        timezone={}&\
-        forecast_days=7&",
-        latitude, longitude, time_zone
-    );
-    let request = reqwest::get(&url);
-    let response = request.await?;
-    let result = response.json::<OpenMeteoResponse>().await?;
+    let current: Envelope<RawCurrent> =
+        get_envelope(&client, &format!("{ONE_CALL_BASE}/current?{q}")).await?;
+    let daily: Envelope<RawDaily> =
+        get_envelope(&client, &format!("{ONE_CALL_BASE}/timeline/1day?{q}")).await?;
+    let hourly: Envelope<RawHourly> =
+        get_envelope(&client, &format!("{ONE_CALL_BASE}/timeline/1h?{q}")).await?;
 
-    Ok(result)
+    let timezone_offset = current.timezone_offset;
+
+    let cur = current.data.into_iter().next().unwrap_or_default();
+    let (cur_desc, cur_icon) = first_condition(&cur.weather);
+
+    let response = WeatherResponse {
+        timezone_offset,
+        current: CurrentWeather {
+            dt: cur.dt,
+            temp: cur.temp,
+            feels_like: cur.feels_like,
+            pressure: cur.pressure,
+            humidity: cur.humidity,
+            dew_point: cur.dew_point,
+            uvi: cur.uvi,
+            clouds: cur.clouds,
+            visibility: cur.visibility,
+            wind_speed: cur.wind_speed,
+            wind_deg: cur.wind_deg,
+            wind_gust: cur.wind_gust,
+            description: cur_desc,
+            icon: cur_icon,
+        },
+        hourly: hourly
+            .data
+            .into_iter()
+            .map(|h| {
+                let (description, icon) = first_condition(&h.weather);
+                HourlyEntry {
+                    dt: h.dt,
+                    temp: h.temp,
+                    feels_like: h.feels_like,
+                    pop: (h.pop * 100.0).round() as u16,
+                    wind_speed: h.wind_speed,
+                    wind_deg: h.wind_deg,
+                    description,
+                    icon,
+                }
+            })
+            .collect(),
+        daily: daily
+            .data
+            .into_iter()
+            .map(|d| {
+                let (description, icon) = first_condition(&d.weather);
+                DailyEntry {
+                    dt: d.dt,
+                    sunrise: d.sunrise,
+                    sunset: d.sunset,
+                    moonrise: d.moonrise,
+                    moonset: d.moonset,
+                    moon_phase: d.moon_phase,
+                    temp_min: d.temp.min,
+                    temp_max: d.temp.max,
+                    temp_morn: d.temp.morn,
+                    temp_day: d.temp.day,
+                    temp_eve: d.temp.eve,
+                    temp_night: d.temp.night,
+                    feels_morn: d.feels_like.morn,
+                    feels_day: d.feels_like.day,
+                    feels_eve: d.feels_like.eve,
+                    feels_night: d.feels_like.night,
+                    pressure: d.pressure,
+                    humidity: d.humidity,
+                    dew_point: d.dew_point,
+                    wind_speed: d.wind_speed,
+                    wind_deg: d.wind_deg,
+                    wind_gust: d.wind_gust,
+                    clouds: d.clouds,
+                    pop: (d.pop * 100.0).round() as u16,
+                    uvi: d.uvi,
+                    rain: d.rain,
+                    snow: d.snow,
+                    description,
+                    icon,
+                }
+            })
+            .collect(),
+        alerts: daily
+            .alerts
+            .into_iter()
+            .chain(hourly.alerts)
+            .chain(current.alerts)
+            .map(|a| Alert {
+                event: a.event,
+                sender_name: a.sender_name,
+                start: a.start,
+                end: a.end,
+                description: a.description,
+            })
+            .collect(),
+    };
+
+    Ok(response)
 }
 
-pub fn get_weather_description(code: u16) -> (&'static str, &'static str) {
-    match code {
-        0 => ("Clear sky", "☀️"),
-        1 => ("Mainly clear", "🌤️"),
-        2 => ("Partly cloudy", "⛅"),
-        3 => ("Overcast", "☁️"),
-        45 => ("Fog", "🌫️"),
-        48 => ("Depositing rime fog", "🌫️❄️"),
-        51 => ("Light drizzle", "🌦️"),
-        53 => ("Moderate drizzle", "🌧️"),
-        55 => ("Dense drizzle", "🌧️"),
-        56 => ("Light freezing drizzle", "🌧️❄️"),
-        57 => ("Dense freezing drizzle", "🌧️❄️"),
-        61 => ("Slight rain", "🌦️"),
-        63 => ("Moderate rain", "🌧️"),
-        65 => ("Heavy rain", "🌧️🌧️"),
-        66 => ("Light freezing rain", "🌧️❄️"),
-        67 => ("Heavy freezing rain", "🌧️❄️❄️"),
-        71 => ("Slight snow fall", "🌨️"),
-        73 => ("Moderate snow fall", "🌨️❄️"),
-        75 => ("Heavy snow fall", "❄️❄️"),
-        77 => ("Snow grains", "🌨️🧂"),
-        80 => ("Slight rain showers", "🌦️"),
-        81 => ("Moderate rain showers", "🌧️"),
-        82 => ("Violent rain showers", "⛈️"),
-        85 => ("Slight snow showers", "🌨️"),
-        86 => ("Heavy snow showers", "❄️❄️"),
-        95 => ("Thunderstorm", "🌩️"),
-        96 => ("Thunderstorm w/ hail", "⛈️🧊"),
-        99 => ("Heavy TS w/ hail", "⛈️🧊🧊"),
-        _ => ("Unknown", "❓"),
+/// Hourly entries that fall on the given local date. May be empty for days
+/// beyond the near-term hourly horizon (One Call 4.0 returns ~1 day of hours).
+pub fn hourly_weather_for(data: &WeatherResponse, date: NaiveDate) -> Vec<HourlyEntry> {
+    data.hourly
+        .iter()
+        .filter(|h| data.local(h.dt).date() == date)
+        .cloned()
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Presentation helpers
+// ---------------------------------------------------------------------------
+
+/// Map an OpenWeatherMap icon code (e.g. `01d`, `10n`) to an emoji.
+pub fn icon_to_emoji(icon: &str) -> &'static str {
+    match icon {
+        "01d" => "☀️",
+        "01n" => "🌙",
+        "02d" => "🌤️",
+        "02n" => "☁️",
+        "03d" | "03n" => "⛅",
+        "04d" | "04n" => "☁️",
+        "09d" | "09n" => "🌧️",
+        "10d" => "🌦️",
+        "10n" => "🌧️",
+        "11d" | "11n" => "⛈️",
+        "13d" | "13n" => "❄️",
+        "50d" | "50n" => "🌫️",
+        _ => "🌡️",
     }
 }
 
 pub fn get_cardinal_direction(degrees: f32) -> &'static str {
     let directions = [
-        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
-        "NW", "NNW",
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW",
+        "NNW",
     ];
     let normalized = (degrees % 360.0 + 360.0) % 360.0;
     let index = (normalized / 22.5).round() as usize % 16;
     directions[index]
 }
 
-pub enum WeatherQuery {
-    Daily { date: NaiveDate },
-    Hourly { date_time: NaiveDateTime },
+/// Convert wind speed from m/s (OWM metric) to km/h.
+pub fn ms_to_kmh(ms: f32) -> f32 {
+    ms * 3.6
 }
 
-pub struct Weather {
-    pub weather_code: u16,
-    pub precip: u16,
-    pub temp: f32,
-    pub apparent_temp: f32,
-    pub date_time: NaiveDateTime,
-}
-
-pub fn hourly_weather_for(data: &OpenMeteoResponse, date: NaiveDate) -> Vec<Weather> {
-    let mut vec: Vec<Weather> = Vec::new();
-    let start_index = data
-        .hourly
-        .date_time
-        .iter()
-        .map(|date_time| {
-            NaiveDateTime::parse_from_str(date_time, "%Y-%m-%dT%H:%M")
-                .unwrap_or_default()
-                .date()
-        })
-        .position(|parssed_date| parssed_date == date)
-        .unwrap_or_default();
-    for i in start_index..start_index + 24 {
-        vec.push(Weather {
-            date_time: NaiveDateTime::parse_from_str(
-                data.hourly.date_time[i].as_str(),
-                "%Y-%m-%dT%H:%M",
-            )
-            .unwrap_or_default(),
-            weather_code: data.hourly.weather_code[i],
-            temp: data.hourly.temperature_2m[i],
-            apparent_temp: data.hourly.apparent_temperature[i],
-            precip: data.hourly.precipitation_probability[i],
-        });
-    }
-
-    vec
-}
-
-pub fn weather_lookup(data: &OpenMeteoResponse, query: WeatherQuery) -> Option<Weather> {
-    match query {
-        WeatherQuery::Daily { date } => {
-            let i = data
-                .daily
-                .date
-                .iter()
-                .map(|date_str| NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap_or_default())
-                .position(|parsed_date| parsed_date == date)?;
-            Some(Weather {
-                weather_code: data.daily.weather_code[i],
-                temp: data.daily.temperature_2m_max[i],
-                precip: data.daily.precipitation_probability_max[i],
-                apparent_temp: data.daily.apparent_temperature_max[i],
-                date_time: NaiveDateTime::parse_from_str(data.daily.date[i].as_str(), "%Y-%m-%d")
-                    .ok()?,
-            })
-        }
-        WeatherQuery::Hourly { date_time } => {
-            let i = data
-                .hourly
-                .date_time
-                .iter()
-                .map(|date_str| {
-                    NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M").unwrap_or_default()
-                })
-                .position(|parsed_date| parsed_date == date_time)?;
-            Some(Weather {
-                date_time: NaiveDateTime::parse_from_str(
-                    data.hourly.date_time[i].as_str(),
-                    "%Y-%m-%dT%H:%M",
-                )
-                .ok()?,
-                weather_code: data.hourly.weather_code[i],
-                temp: data.hourly.temperature_2m[i],
-                precip: data.hourly.precipitation_probability[i],
-                apparent_temp: data.hourly.apparent_temperature[i],
-            })
-        }
+/// Describe the lunar phase from the 0..1 value OWM provides.
+pub fn moon_phase_name(phase: f32) -> &'static str {
+    match phase {
+        p if p <= 0.0 || p >= 1.0 => "🌑 New moon",
+        p if p < 0.25 => "🌒 Waxing crescent",
+        p if (p - 0.25).abs() < 0.02 => "🌓 First quarter",
+        p if p < 0.5 => "🌔 Waxing gibbous",
+        p if (p - 0.5).abs() < 0.02 => "🌕 Full moon",
+        p if p < 0.75 => "🌖 Waning gibbous",
+        p if (p - 0.75).abs() < 0.02 => "🌗 Last quarter",
+        _ => "🌘 Waning crescent",
     }
 }

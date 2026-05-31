@@ -93,12 +93,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1763,15 +1757,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tz"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d913b8cb37a5ee7c816cd936d745573828702d3f8abe07aadbf4ea7573253d5"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1936,15 +1921,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crossterm 0.29.0",
- "iana-time-zone",
  "ratatui",
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "throbber-widgets-tui",
  "tokio",
  "tui-textarea",
- "tz",
 ]
 
 [[package]]

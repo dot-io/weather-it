@@ -8,46 +8,48 @@
 
 ![Screenshot](./imgs/screenshot.png)
 
-Weather is a terminal-based weather dashboard built with Rust and [ratatui](https://github.com/ratatui-org/ratatui). It provides real-time weather forecasts, including daily and hourly details, using the Open-Meteo API. The app features a search bar for location queries, a daily weather overview, and an interactive hourly weather table.
+Weather is a terminal-based weather dashboard built with Rust and [ratatui](https://github.com/ratatui-org/ratatui). It provides real-time weather forecasts, including a scrollable weekly overview and per-day details, using the [OpenWeatherMap One Call API 4.0](https://openweathermap.org/api/one-call-4). On launch it auto-locates you by IP; a search bar lets you look up any other city.
+
+> This is a fork of [oneirosoft/weather-it](https://github.com/oneirosoft/weather-it), migrated from Open-Meteo to OpenWeatherMap and extended with a full per-day detail view (morning/day/evening/night temps, feels-like, humidity, dew point, pressure, wind & gusts, cloud cover, UV index, sunrise/sunset, moon phase, and weather alerts).
 
 ## How to Use
 
-- Launch the app in your terminal.
-- Use the search bar at the top to enter a city or location name.
-- Press `Enter` to fetch and display the weather for the selected location.
-- Navigate between days using the `Tab` and `Shift+Tab` keys to view daily forecasts.
-- The hourly table updates to show detailed weather for the selected day.
+- Launch the app in your terminal. It auto-locates by IP and loads the forecast.
+- The week overview is on top; the selected day's full details and hourly table are below.
+- Move between days with `h`/`l`, scroll the hourly table with `j`/`k`.
+- Press `/` to focus the search bar, type a city, and press `Enter`. `Esc` cancels.
 
 ### Keyboard Shortcuts
 
-| Shortcut    | Action                         |
-| ----------- | ------------------------------ |
-| `Ctrl+C`    | Exit the app                   |
-| `Enter`     | Search for location weather    |
-| `Ctrl+R`    | Refresh weather data           |
-| `Tab`       | Next day in daily forecast     |
-| `Shift+Tab` | Previous day in daily forecast |
+| Shortcut             | Action                                   |
+| -------------------- | ---------------------------------------- |
+| `h` / `←`            | Previous day                             |
+| `l` / `→` / `Tab`    | Next day                                 |
+| `j` / `↓`            | Scroll hourly table down                 |
+| `k` / `↑`            | Scroll hourly table up                   |
+| `/` or `i`           | Focus the search bar                     |
+| `Enter`              | Search for the typed location            |
+| `Esc`                | Cancel search / quit (in browse mode)    |
+| `r`                  | Refresh weather data                     |
+| `q` / `Ctrl+C`       | Exit the app                             |
 
 ## How to Configure and Run
 
 1. **Install Rust**  
    Make sure you have [Rust](https://rustup.rs/) installed.
 
-2. **Clone the Repository**
+2. **Get an OpenWeatherMap API key with One Call 4.0**
+   - Create a key at [openweathermap.org](https://openweathermap.org/api).
+   - Subscribe to the **One Call by Call** plan (the free tier allows **1,000 calls/day**; a card is required, but you can cap calls in **Billing plans** to avoid charges). One Call 4.0 will return `401` until this subscription is active.
 
-   ```sh
-   git clone https://github.com/oneirosoft/weather-it.git
-   cd weather-it
-   ```
+3. **Provide the key** via either:
+   - the `OWM_API_KEY` environment variable, or
+   - a single-line file at `~/.config/waybar/scripts/.owm_api_key`.
 
-3. **Build and Run**
+4. **Build and Run**
 
    ```sh
    cargo run
    ```
 
-4. **Configuration**
-   - No API keys are required; the app uses the free Open-Meteo API.
-   - Ensure you have an internet connection for fetching weather data.
-
-Enjoy your weather dashboard in the terminal!
+The app makes 3 API calls per refresh (current + daily + hourly) and auto-refreshes every 30 minutes, staying well under the free 1,000 calls/day.

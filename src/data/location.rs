@@ -52,3 +52,40 @@ pub async fn geocode(
 
     Ok((data.first().unwrap().name.clone(), result))
 }
+
+/// IP-based geolocation via ipinfo.io, used when no search query is given.
+#[derive(Debug, Deserialize)]
+struct IpInfo {
+    /// "lat,lon"
+    loc: String,
+    #[serde(default)]
+    city: String,
+    #[serde(default)]
+    region: String,
+}
+
+pub async fn ip_location() -> Result<(String, f32, f32), Box<dyn Error + Send + Sync>> {
+    let client = Client::new();
+    let data = client
+        .get("https://ipinfo.io/json")
+        .header("User-Agent", "weather-it")
+        .send()
+        .await?
+        .json::<IpInfo>()
+        .await?;
+
+    let (lat_str, lon_str) = data
+        .loc
+        .split_once(',')
+        .ok_or("ipinfo returned no coordinates")?;
+    let lat: f32 = lat_str.trim().parse()?;
+    let lon: f32 = lon_str.trim().parse()?;
+
+    let name = match (data.city.is_empty(), data.region.is_empty()) {
+        (false, false) => format!("{}, {}", data.city, data.region),
+        (false, true) => data.city,
+        _ => "Current location".to_string(),
+    };
+
+    Ok((name, lat, lon))
+}

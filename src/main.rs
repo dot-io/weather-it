@@ -13,6 +13,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = ratatui::init();
     let (tx, mut rx) = mpsc::channel(1);
     let mut app = App::new(tx);
+    // Kick off an initial IP-based fetch so the dashboard isn't empty.
+    app.request_initial_fetch();
     let app_result = app.run(&mut terminal, &mut rx).await;
     ratatui::restore();
     app_result
